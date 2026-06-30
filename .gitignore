@@ -1,0 +1,41 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Generated data (large binary/CSV files)
+data/synthetic/
+
+# PostgreSQL data (Docker volume content)
+pgdata/
+
+# Results and figures (regeneratable)
+results/*.json
+figures/*.png
+figures/*.pdf
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# Internal research notes (not for public repo)
+report/
+
+# Claude Code local config
+.claude/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

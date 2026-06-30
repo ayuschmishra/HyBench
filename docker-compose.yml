@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: hybench_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hybench}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hybench}
+      POSTGRES_DB: ${POSTGRES_DB:-hybench}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - hybench_pgdata:/var/lib/postgresql/data
+      - ./sql/create_tables.sql:/docker-entrypoint-initdb.d/01_create_tables.sql
+    command: >
+      postgres
+        -c shared_buffers=512MB
+        -c effective_cache_size=1536MB
+        -c maintenance_work_mem=256MB
+        -c max_parallel_workers_per_gather=2
+        -c work_mem=64MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hybench}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  hybench_pgdata:
