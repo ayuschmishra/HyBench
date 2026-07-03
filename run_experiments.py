@@ -77,19 +77,29 @@ def main():
                         help="Run only this experiment (1 or 2)")
     parser.add_argument("--n-queries", type=int, default=50)
     parser.add_argument("--n-warmup",  type=int, default=5)
+    parser.add_argument(
+        "--scale", choices=["small", "full"], default="full",
+        help="small=10K rows (~5 min), full=50K rows (~45 min) [default: full]",
+    )
     args = parser.parse_args()
+
+    n_rows = 10_000 if args.scale == "small" else 50_000
 
     run_exp1 = args.exp is None or args.exp == 1
     run_exp2 = args.exp is None or args.exp == 2
 
     if not args.skip_data_gen and run_exp1:
-        run(["data_gen/generator.py"], "Data generation (50K rows + embeddings)")
+        run(
+            ["data_gen/generator.py", f"--n-rows={n_rows}"],
+            f"Data generation ({n_rows:,} rows + embeddings)",
+        )
 
     if run_exp1:
         run(
             ["experiments/exp_01_selectivity.py",
              f"--n-queries={args.n_queries}",
-             f"--n-warmup={args.n_warmup}"],
+             f"--n-warmup={args.n_warmup}",
+             f"--n-rows={n_rows}"],
             "Experiment 1 — Filter Selectivity vs. Latency (RQ1)",
         )
 
@@ -104,7 +114,8 @@ def main():
         run(
             ["experiments/exp_02_adaptive.py",
              f"--n-queries={args.n_queries}",
-             f"--n-warmup={args.n_warmup}"],
+             f"--n-warmup={args.n_warmup}",
+             f"--n-rows={n_rows}"],
             "Experiment 2 — Adaptive Selector Evaluation (RQ2)",
         )
 

@@ -9,6 +9,7 @@ Provides:
 
 from typing import Dict, List, Optional
 import numpy as np
+from scipy import stats
 
 
 def compute_recall_at_k(
@@ -35,11 +36,20 @@ def aggregate_latencies(latencies_s: List[float]) -> Dict[str, float]:
     Compute summary statistics over a list of per-query latencies (seconds).
 
     Returns a dict with keys:
-        mean_ms, median_ms, p95_ms, p99_ms, iqr_ms, min_ms, max_ms, std_ms
+        mean_ms, median_ms, p95_ms, p99_ms, iqr_ms, min_ms, max_ms, std_ms,
+        ci_95_lower_ms, ci_95_upper_ms
     """
     arr = np.array(latencies_s) * 1000.0  # convert to milliseconds
+    n = len(arr)
+    mean = float(np.mean(arr))
+    if n > 1:
+        se = float(stats.sem(arr))
+        ci = stats.t.interval(0.95, df=n - 1, loc=mean, scale=se)
+        ci_lower, ci_upper = float(ci[0]), float(ci[1])
+    else:
+        ci_lower, ci_upper = mean, mean
     return {
-        "mean_ms":   float(np.mean(arr)),
+        "mean_ms":   mean,
         "median_ms": float(np.median(arr)),
         "p95_ms":    float(np.percentile(arr, 95)),
         "p99_ms":    float(np.percentile(arr, 99)),
@@ -47,9 +57,22 @@ def aggregate_latencies(latencies_s: List[float]) -> Dict[str, float]:
         "min_ms":    float(np.min(arr)),
         "max_ms":    float(np.max(arr)),
         "std_ms":    float(np.std(arr)),
-        "n_samples": len(latencies_s),
+        "ci_95_lower_ms": ci_lower,
+        "ci_95_upper_ms": ci_upper,
+        "n_samples": n,
         "raw_ms":    arr.tolist(),
     }
+
+
+def confidence_interval_95(latencies_ms: np.ndarray) -> tuple:
+    """Return (lower, upper) bounds of 95% CI using t-distribution."""
+    n = len(latencies_ms)
+    if n < 2:
+        return (float(latencies_ms[0]), float(latencies_ms[0]))
+    mean = float(np.mean(latencies_ms))
+    se = float(stats.sem(latencies_ms))
+    ci = stats.t.interval(0.95, df=n - 1, loc=mean, scale=se)
+    return (float(ci[0]), float(ci[1]))
 
 
 def compute_speedup(stats_a: Dict, stats_b: Dict, metric: str = "mean_ms") -> float:

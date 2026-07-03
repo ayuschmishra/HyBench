@@ -135,10 +135,9 @@ class BenchmarkRunner:
         n_candidates = top_k * candidate_multiplier
 
         if self.cfg.index_type == "ivfflat":
-            set_session_gucs(
-                self.conn,
-                enable_seqscan=False,
-                ivfflat_probes=self.cfg.ivfflat.nprobe,
+            raise NotImplementedError(
+                "IVFFlat support deferred to HyBench v0.2. "
+                "Use index_type='hnsw' for v0.1."
             )
         elif self.cfg.index_type == "hnsw":
             # ef_search must be >= n_candidates for HNSW to return enough rows.

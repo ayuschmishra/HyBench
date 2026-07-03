@@ -11,6 +11,7 @@ Output: results/exp_02_adaptive.json
 """
 
 import argparse
+import platform
 import json
 import sys
 import datetime
@@ -33,6 +34,7 @@ from benchmark.config import (
 from benchmark.db import connection, get_filtered_row_count, get_table_row_count
 from benchmark.planner import execute_adaptive
 from benchmark.runner import BenchmarkRunner
+from benchmark.metrics import compute_recall_at_k
 
 # Laptop-relevant queries (used for selectivity configs that filter by Laptop category)
 LAPTOP_QUERIES = [
@@ -46,6 +48,51 @@ LAPTOP_QUERIES = [
     "laptop best display quality",
     "rugged laptop outdoor use",
     "laptop thunderbolt connectivity",
+    "laptop for machine learning training",
+    "business laptop enterprise security",
+    "laptop with OLED display",
+    "silent fanless laptop coding",
+    "laptop large RAM capacity",
+    "convertible 2-in-1 laptop tablet",
+    "laptop long battery life over 12 hours",
+    "laptop with best keyboard typing",
+    "high refresh rate laptop gaming",
+    "laptop for data science Python",
+    "compact 13 inch ultrabook",
+    "laptop multiple monitor support",
+    "powerful laptop under 80000 rupees",
+    "laptop for graphic design illustration",
+    "AMD Ryzen laptop best value",
+    "laptop fast SSD NVMe storage",
+    "laptop with webcam quality streaming",
+    "quiet laptop library silent use",
+    "laptop dual GPU rendering",
+    "sturdy laptop build quality premium",
+    "laptop with best speakers audio",
+    "17 inch large screen laptop",
+    "laptop USB-C charging universal",
+    "laptop for software development IDE",
+    "lightweight laptop under 1.5 kg",
+    "laptop for music production DAW",
+    "laptop DDR5 fast memory",
+    "touchscreen laptop creative work",
+    "laptop for competitive programming",
+    "laptop with mini LED display",
+    "affordable gaming laptop budget",
+    "laptop for video conferencing remote work",
+    "laptop with good cooling system",
+    "laptop for 3D modelling CAD",
+    "laptop upgradeable RAM storage",
+    "Intel Core Ultra laptop AI",
+    "laptop for photo editing Lightroom",
+    "laptop matte anti-glare display",
+    "laptop for college engineering student",
+    "laptop PCIe Gen 5 SSD fast",
+    "slim laptop powerful processor",
+    "laptop for cybersecurity penetration testing",
+    "laptop with fingerprint reader security",
+    "laptop for cloud computing development",
+    "laptop QHD 2K display resolution",
 ]
 
 # General queries (used for cross-category price-only selectivity configs)
@@ -60,6 +107,51 @@ GENERAL_QUERIES = [
     "keyboard mac users",
     "mouse FPS gaming",
     "tablet students reading browsing",
+    "gaming console family entertainment",
+    "4K monitor photo video editing",
+    "mechanical keyboard cherry switches",
+    "ergonomic mouse wrist pain",
+    "portable bluetooth speaker outdoor",
+    "mirrorless camera travel photography",
+    "gaming headset microphone quality",
+    "ultrawide monitor productivity",
+    "wireless keyboard mouse combo",
+    "smart home speaker multi-room",
+    "action camera underwater waterproof",
+    "curved gaming monitor immersive",
+    "studio monitor headphones mixing",
+    "compact keyboard travel portable",
+    "vertical mouse ergonomic design",
+    "soundbar home theatre surround",
+    "DSLR camera wildlife bird photography",
+    "gaming mouse lightweight competitive",
+    "high refresh rate monitor esports",
+    "tablet digital art drawing stylus",
+    "console exclusive games library",
+    "bookshelf speakers audiophile quality",
+    "webcam streaming content creation",
+    "trackball mouse precision CAD",
+    "gaming keyboard RGB customizable",
+    "smartphone best battery life",
+    "camera lens portrait photography",
+    "monitor eye care blue light",
+    "true wireless earbuds sport fitness",
+    "speaker party outdoor waterproof loud",
+    "tablet with cellular 5G connectivity",
+    "retro gaming console classic games",
+    "monitor USB-C docking station",
+    "over-ear headphones comfort long wear",
+    "silent keyboard office quiet",
+    "smartphone foldable flexible display",
+    "camera video recording vlogging",
+    "monitor HDR content creation",
+    "mouse wireless multi-device bluetooth",
+    "speaker voice control smart home",
+    "tablet productivity office work",
+    "headphones spatial audio Dolby Atmos",
+    "keyboard hot-swappable switches custom",
+    "monitor mini-LED local dimming",
+    "camera medium format professional",
 ]
 
 
@@ -70,10 +162,12 @@ def main():
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--ef-search", type=int, default=40)
     parser.add_argument("--threshold", type=float, default=ADAPTIVE_THRESHOLD)
+    parser.add_argument("--n-rows", type=int, default=50_000,
+                        help="Dataset size to benchmark against (default: 50000)")
     args = parser.parse_args()
 
     db_cfg = DBConfig()
-    data_cfg = DataConfig()
+    data_cfg = DataConfig(n_rows=args.n_rows)
 
     print(f"[exp_02] Loading embedding model ...")
     model = SentenceTransformer(data_cfg.embedding_model, local_files_only=True)
@@ -98,9 +192,20 @@ def main():
         hnsw=HNSWConfig(ef_search=args.ef_search),
     )
 
+    def discard_session(conn) -> None:
+        """Clear PostgreSQL session state (prepared plans, GUCs) between passes."""
+        with conn.cursor() as _cur:
+            _cur.execute("DISCARD ALL")
+        conn.commit()
+
     results = []
+    pg_version = ""
 
     with connection(db_cfg) as conn:
+        with conn.cursor() as _cur:
+            _cur.execute("SELECT version()")
+            pg_version = _cur.fetchone()[0]
+
         total_rows = get_table_row_count(conn, "products")
         runner = BenchmarkRunner(
             conn=conn, cfg=bench_cfg, db_cfg=db_cfg, total_rows=total_rows
@@ -123,38 +228,50 @@ def main():
 
             # Each condition runs in its own pass with its own warmup to prevent
             # buffer cache effects from one condition contaminating another's latency.
+            # DISCARD ALL clears session GUCs and prepared statement caches between passes.
 
             # --- Fixed-A pass ---
+            discard_session(conn)
             for q in warmup_q:
                 runner.run_strategy_a(q, cat, mp, mr, args.top_k)
-            lat_a = [
-                runner.run_strategy_a(q, cat, mp, mr, args.top_k).latency_s * 1000
-                for q in run_q
-            ]
+            lat_a = []
+            recall_a = []
+            for q in run_q:
+                gt_ids = runner.compute_ground_truth(q, cat, mp, mr, args.top_k)
+                res_a = runner.run_strategy_a(q, cat, mp, mr, args.top_k)
+                lat_a.append(res_a.latency_s * 1000)
+                recall_a.append(compute_recall_at_k(res_a.ids, gt_ids, args.top_k))
 
             # --- Fixed-B pass ---
+            discard_session(conn)
             for q in warmup_q:
                 runner.run_strategy_b(q, cat, mp, mr, args.top_k)
-            lat_b = [
-                runner.run_strategy_b(q, cat, mp, mr, args.top_k).latency_s * 1000
-                for q in run_q
-            ]
+            lat_b = []
+            recall_b = []
+            for q in run_q:
+                gt_ids = runner.compute_ground_truth(q, cat, mp, mr, args.top_k)
+                res_b = runner.run_strategy_b(q, cat, mp, mr, args.top_k)
+                lat_b.append(res_b.latency_s * 1000)
+                recall_b.append(compute_recall_at_k(res_b.ids, gt_ids, args.top_k))
 
             # Oracle: per-query min of the two fixed-condition latencies above
             lat_oracle = [min(a, b) for a, b in zip(lat_a, lat_b)]
 
             # --- Adaptive pass (separate warmup so no cache carryover) ---
+            discard_session(conn)
             for q in warmup_q:
                 execute_adaptive(runner, q, cat, mp, mr, total_rows, args.top_k, args.threshold)
 
-            lat_adapt, adapt_choices, probe_times = [], [], []
+            lat_adapt, adapt_choices, probe_times, recall_adapt = [], [], [], []
             for q in run_q:
+                gt_ids = runner.compute_ground_truth(q, cat, mp, mr, args.top_k)
                 res_ad, sigma_ad, choice, probe_s = execute_adaptive(
                     runner, q, cat, mp, mr, total_rows, args.top_k, args.threshold
                 )
                 lat_adapt.append(res_ad.latency_s * 1000)
                 adapt_choices.append(choice)
                 probe_times.append(probe_s * 1000)
+                recall_adapt.append(compute_recall_at_k(res_ad.ids, gt_ids, args.top_k))
 
             def stats(vals):
                 arr = np.array(vals)
@@ -179,6 +296,9 @@ def main():
                 "oracle": stats(lat_oracle),
                 "adaptive_choices": {"A": n_chose_a, "B": n_chose_b},
                 "probe_overhead_ms": stats(probe_times),
+                "recall_a": float(np.mean(recall_a)),
+                "recall_b": float(np.mean(recall_b)),
+                "recall_adaptive": float(np.mean(recall_adapt)),
             }
             results.append(row)
 
@@ -204,6 +324,9 @@ def main():
             "index_type": "hnsw",
             "ef_search": args.ef_search,
             "threshold": args.threshold,
+            "platform": platform.platform(),
+            "python_version": sys.version,
+            "pg_version": pg_version,
         },
         "results": results,
     }

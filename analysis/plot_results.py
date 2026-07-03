@@ -69,67 +69,79 @@ def fig_01_latency_vs_selectivity(theta_star: float = None):
     a_std  = [r["strategy_a"].get("std_ms",  0) if r.get("strategy_a") else 0 for r in rows]
     b_mean = [r["strategy_b"].get("mean_ms", 0) if r.get("strategy_b") else 0 for r in rows]
     b_std  = [r["strategy_b"].get("std_ms",  0) if r.get("strategy_b") else 0 for r in rows]
+    a_recall = [r["strategy_a"].get("recall_mean", 0) if r.get("strategy_a") else 0 for r in rows]
+    b_recall = [r["strategy_b"].get("recall_mean", 0) if r.get("strategy_b") else 0 for r in rows]
 
     # Find crossover if theta_star not supplied
     if theta_star is None:
         for i in range(len(sels) - 1):
             if (a_mean[i] <= b_mean[i]) != (a_mean[i+1] <= b_mean[i+1]):
-                # Linear interpolation between the two bracketing points
-                da = a_mean[i+1] - a_mean[i]
-                db = b_mean[i+1] - b_mean[i]
                 ds = sels[i+1] - sels[i]
-                if abs(da - db) > 1e-9:
-                    theta_star = sels[i] + ds * (b_mean[i] - a_mean[i]) / ((da - db) * -1 + (b_mean[i] - a_mean[i]) / ds * 0)
-                    # simpler: find where a_mean-b_mean crosses 0 linearly
-                    diff_i   = a_mean[i]   - b_mean[i]
-                    diff_ip1 = a_mean[i+1] - b_mean[i+1]
+                diff_i   = a_mean[i]   - b_mean[i]
+                diff_ip1 = a_mean[i+1] - b_mean[i+1]
+                if abs(diff_i - diff_ip1) > 1e-9:
                     theta_star = sels[i] + ds * diff_i / (diff_i - diff_ip1)
                 break
 
     with plt.style.context(STYLE):
-        fig, ax = plt.subplots(figsize=(7, 4.5))
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 7), height_ratios=[3, 1.2])
 
-        ax.errorbar(sels, a_mean, yerr=a_std, fmt="o-", color=COL_A,
-                    label="Strategy A (vector-first)", capsize=3, linewidth=1.8)
-        ax.errorbar(sels, b_mean, yerr=b_std, fmt="s-", color=COL_B,
-                    label="Strategy B (filter-first)", capsize=3, linewidth=1.8)
+        # --- Top subplot: Latency vs Selectivity ---
+        ax1.errorbar(sels, a_mean, yerr=a_std, fmt="o-", color=COL_A,
+                     label="Strategy A (vector-first)", capsize=3, linewidth=1.8)
+        ax1.errorbar(sels, b_mean, yerr=b_std, fmt="s-", color=COL_B,
+                     label="Strategy B (filter-first)", capsize=3, linewidth=1.8)
 
         if theta_star is not None:
-            ax.axvline(theta_star, linestyle="--", color="#CC79A7", linewidth=1.4,
-                       label=f"θ* ≈ {theta_star:.1f}%")
-            ax.annotate(
+            ax1.axvline(theta_star, linestyle="--", color="#CC79A7", linewidth=1.4,
+                        label=f"θ* ≈ {theta_star:.1f}%")
+            ax1.annotate(
                 f"θ* ≈ {theta_star:.1f}%",
-                xy=(theta_star, ax.get_ylim()[1] * 0.95),
+                xy=(theta_star, ax1.get_ylim()[1] * 0.95),
                 xytext=(4, 0), textcoords="offset points",
                 fontsize=8, color="#CC79A7",
             )
 
-        ax.set_xscale("log")
-        ax.set_xlabel("Filter Selectivity (%) — log scale")
-        ax.set_ylabel("Mean Query Latency (ms)\n(error bars: ±1 SD, n=50 queries)")
-        ax.set_title(
+        ax1.set_xscale("log")
+        ax1.set_xlabel("Filter Selectivity (%) — log scale")
+        ax1.set_ylabel("Mean Query Latency (ms)\n(error bars: ±1 SD, n=50 queries)")
+        ax1.set_title(
             "Figure 1 — Filter Selectivity vs. Query Latency (RQ1)\n"
             "50K rows · HNSW m=16 ef_search=40 · K=10 · "
             "Recall@K relative to filtered set"
         )
-        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
-        ax.xaxis.set_minor_formatter(mticker.NullFormatter())
-        ax.legend(loc="upper right")
+        ax1.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
+        ax1.xaxis.set_minor_formatter(mticker.NullFormatter())
+        ax1.legend(loc="upper right")
 
-        # Inset table: actual vs nominal selectivity
+        # Inset table: actual vs nominal selectivity (repositioned to avoid overlap)
         table_data = [
             [f"{r['target_selectivity']*100:.0f}%", f"{r['actual_selectivity']*100:.1f}%",
              f"{r['n_filtered']:,}"]
             for r in rows
         ]
-        table = ax.table(
+        table = ax1.table(
             cellText=table_data,
             colLabels=["Target σ", "Actual σ", "Rows"],
-            loc="lower left",
-            bbox=[0.02, 0.02, 0.34, 0.40],
+            loc="center right",
+            bbox=[0.60, 0.35, 0.36, 0.42],
         )
         table.auto_set_font_size(False)
         table.set_fontsize(7)
+
+        # --- Bottom subplot: Recall@K vs Selectivity ---
+        ax2.plot(sels, a_recall, "o-", color=COL_A,
+                 label="Strategy A", linewidth=1.8, markersize=5)
+        ax2.plot(sels, b_recall, "s-", color=COL_B,
+                 label="Strategy B", linewidth=1.8, markersize=5)
+        ax2.set_xscale("log")
+        ax2.set_xlabel("Filter Selectivity (%) — log scale")
+        ax2.set_ylabel("Recall@10")
+        ax2.set_ylim(-0.05, 1.15)
+        ax2.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
+        ax2.xaxis.set_minor_formatter(mticker.NullFormatter())
+        ax2.legend(loc="lower right", fontsize=8)
+        ax2.axhline(1.0, linestyle=":", color="grey", linewidth=0.8, alpha=0.5)
 
         fig.tight_layout()
         out = FIGURES_DIR / "fig_01_latency_vs_selectivity.png"
@@ -174,9 +186,9 @@ def fig_02_adaptive_vs_fixed():
             ax.axvline(theta, linestyle="--", color="#CC79A7", linewidth=1.4)
             ax.annotate(
                 f"θ* ≈ {theta:.1f}%",
-                xy=(theta, ax.get_ylim()[0] + (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.05),
-                xytext=(4, 0), textcoords="offset points",
-                fontsize=8, color="#CC79A7",
+                xy=(theta, ax.get_ylim()[1] * 0.85),
+                xytext=(6, 0), textcoords="offset points",
+                fontsize=9, color="#CC79A7", fontweight="bold",
             )
 
         ax.set_xlabel("Filter Selectivity (%)")

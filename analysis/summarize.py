@@ -63,8 +63,9 @@ def summarize_exp02():
         print("## Experiment 2  [NOT RUN]\n")
         return
 
-    theta = data.get("threshold_pct", "?")
-    print(f"## Experiment 2 — Adaptive Selector Evaluation (RQ2)  [θ* = {theta}%]\n")
+    theta_raw = data.get("benchmark_config", {}).get("threshold", None)
+    theta_str = f"{theta_raw*100:.1f}" if isinstance(theta_raw, (int, float)) else "?"
+    print(f"## Experiment 2 — Adaptive Selector Evaluation (RQ2)  [θ* = {theta_str}%]\n")
     rows = sorted(data["results"], key=lambda r: r["actual_selectivity"])
     table_rows = []
     for r in rows:
@@ -73,7 +74,10 @@ def summarize_exp02():
         ad = r["adaptive"]["mean_ms"]
         oc = r["oracle"]["mean_ms"]
         gap_pct = 100 * (ad - oc) / max(oc, 0.001)
-        probe_ms = r["adaptive"].get("selector_overhead_ms", None)
+        probe_stats = r.get("probe_overhead_ms", {})
+        probe_ms = probe_stats.get("mean_ms", None)
+        choices = r.get("adaptive_choices", {})
+        decision = f"A:{choices.get('A', '?')}/B:{choices.get('B', '?')}"
         table_rows.append({
             "Actual σ":       f"{r['actual_selectivity']*100:.1f}%",
             "Fixed-A (ms)":   round(fa, 1),
@@ -81,8 +85,8 @@ def summarize_exp02():
             "Adaptive (ms)":  round(ad, 1),
             "Oracle (ms)":    round(oc, 1),
             "Gap %":          f"{gap_pct:.1f}%",
-            "Probe (ms)":     round(probe_ms, 1) if probe_ms is not None else "—",
-            "Decision":       r["adaptive"].get("strategy_chosen", "?"),
+            "Probe (ms)":     round(probe_ms, 2) if probe_ms is not None else "—",
+            "Decision":       decision,
         })
     print(format_stats_table(table_rows))
 

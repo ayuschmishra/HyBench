@@ -16,10 +16,15 @@ data/synthetic/
 # PostgreSQL data (Docker volume content)
 pgdata/
 
-# Results and figures (regeneratable)
+# Results and figures (regeneratable — but reference copies are committed)
 results/*.json
 figures/*.png
 figures/*.pdf
+# Allow committed reference outputs
+!results/exp_01_selectivity.json
+!results/exp_02_adaptive.json
+!figures/fig_01_latency_vs_selectivity.png
+!figures/fig_02_adaptive_vs_fixed.png
 
 # Jupyter
 .ipynb_checkpoints/

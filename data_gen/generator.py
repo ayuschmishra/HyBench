@@ -315,6 +315,9 @@ def embed_descriptions(
     descriptions: List[str],
     cfg: DataConfig,
 ) -> np.ndarray:
+    # No local_files_only here: data generation is the bootstrap step that
+    # downloads/caches the model on first run. Experiments load it afterwards
+    # with local_files_only=True so timed runs never touch the network.
     model = SentenceTransformer(cfg.embedding_model)
     embeddings = model.encode(
         descriptions,
@@ -412,8 +415,34 @@ def load_to_db(df: pd.DataFrame, embeddings: np.ndarray, db_cfg: DBConfig) -> No
     print("[generator] Database load complete.")
 
 
+def write_checksums(data_dir: Path) -> None:
+    """Write SHA-256 checksums of products.csv and embeddings.npy."""
+    import hashlib
+    checksum_path = data_dir / "checksums.sha256"
+    targets = ["products.csv", "embeddings.npy"]
+    lines = []
+    for name in targets:
+        p = data_dir / name
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        lines.append(f"{h.hexdigest()}  {name}")
+    checksum_path.write_text("\n".join(lines) + "\n")
+    print(f"[generator] Checksums written → {checksum_path}")
+
+
 if __name__ == "__main__":
-    cfg = DataConfig()   # 50K rows, seed=42
+    import argparse
+    _parser = argparse.ArgumentParser(description="Generate HyBench synthetic dataset")
+    _parser.add_argument("--n-rows", type=int, default=50_000,
+                         help="Number of product rows (default: 50000)")
+    _parser.add_argument("--seed", type=int, default=42,
+                         help="Random seed (default: 42)")
+    _args = _parser.parse_args()
+
+    cfg = DataConfig(n_rows=_args.n_rows, random_seed=_args.seed)
     db_cfg = DBConfig()
     df, embeddings = generate_and_save(cfg)
     load_to_db(df, embeddings, db_cfg)
+    write_checksums(Path(cfg.output_dir))
