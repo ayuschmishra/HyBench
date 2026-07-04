@@ -62,6 +62,53 @@ class IVFFlatConfig:
     probes: Optional[int] = None   # query-time GUC: lists probed per search
 
 
+# ---------------------------------------------------------------------------
+# v0.5 — recall-latency Pareto sweep & concurrency evaluation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ParetoConfig:
+    """Search-parameter sweep for the recall-latency Pareto frontier (exp_03).
+
+    For HNSW the swept knob is the query-time GUC hnsw.ef_search; for IVFFlat
+    it is ivfflat.probes. Each value trades recall against latency: larger =
+    higher recall, higher latency. The sweep is what draws the frontier.
+    """
+    # Fixed selectivity level(s) at which to run the sweep (keys into
+    # SELECTIVITY_CONFIGS). Pareto behaviour is cleanest at low selectivity,
+    # where Strategy A's ANN search dominates and post-filtering bites hardest.
+    selectivity_levels: List[float] = field(default_factory=lambda: [0.01, 0.10])
+    ef_search_values: List[int] = field(
+        default_factory=lambda: [10, 20, 40, 80, 160, 320, 640]
+    )
+    probes_values: List[int] = field(
+        default_factory=lambda: [1, 2, 5, 10, 20, 50, 100]
+    )
+
+
+@dataclass
+class ConcurrencyConfig:
+    """Multi-client throughput / contention sweep (exp_04).
+
+    Each client is an independent thread with its own psycopg2 connection
+    issuing the same fixed workload. Aggregate QPS and latency percentiles are
+    reported per client count to characterise contention on HNSW traversal.
+    """
+    client_counts: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    # Single fixed selectivity for the concurrency sweep: contention, not
+    # selectivity, is the independent variable here.
+    selectivity_level: float = 0.10
+    queries_per_client: int = 50
+    warmup_per_client: int = 5
+    strategy: str = "A"           # "A" (vector-first) or "B" (filter-first)
+
+
+# Module-level defaults so experiment scripts and tests share one source.
+PARETO_EF_SEARCH_VALUES: List[int] = [10, 20, 40, 80, 160, 320, 640]
+PARETO_PROBES_VALUES: List[int] = [1, 2, 5, 10, 20, 50, 100]
+CONCURRENCY_CLIENT_COUNTS: List[int] = [1, 2, 4, 8]
+
+
 def ivfflat_lists_for(n_rows: int) -> int:
     """pgvector guidance: lists ≈ rows/1000 for datasets ≤ 1M rows (min 10)."""
     return max(10, n_rows // 1000)

@@ -1,10 +1,12 @@
-# HyBench v0.2
+# HyBench v0.5
 
 **A Reproducible Experimental Framework for Hybrid Relational–Vector Query Processing in PostgreSQL**
 
 > *Empirically characterising filter-selectivity effects on hybrid query latency and validating a lightweight selectivity-aware execution strategy selector.*
 
 > **v0.2 additions:** IVFFlat index comparison, a statistics-based (`pg_stats`) selectivity estimator, memory/storage profiling, and 100K-row runs — see [What's New in v0.2](#whats-new-in-v02).
+>
+> **v0.5 additions:** a recall–latency Pareto sweep (index parameter sensitivity) and a concurrent multi-client throughput/contention evaluation — see [What's New in v0.5](#whats-new-in-v05).
 
 ---
 
@@ -28,6 +30,8 @@ PostgreSQL + pgvector can answer both components, but the execution order — ap
 |----|----------|------------|
 | **RQ1** | How does filter selectivity affect hybrid query latency for Strategy A (vector-first) and Strategy B (filter-first)? | `exp_01_selectivity.py` |
 | **RQ2** | Does a lightweight single-threshold selectivity-aware strategy selector achieve near-oracle latency? | `exp_02_adaptive.py` |
+| **RQ3** | How does Strategy A's ANN search parameter (`ef_search` / `probes`) trade Recall@K against latency — i.e. what does the recall–latency Pareto frontier look like per index? | `exp_03_pareto.py` |
+| **RQ4** | How do hybrid-query throughput (QPS) and tail latency scale as concurrent client count rises? | `exp_04_concurrency.py` |
 
 ---
 
@@ -124,6 +128,26 @@ Dataset: same setup · 4 conditions: Fixed-A, Fixed-B, Adaptive, Oracle (retrosp
 
 Adaptive made the correct strategy decision at all 6 selectivity levels. Oracle gap is within +/-16% at every level.
 
+### Experiment 3 — Recall–Latency Pareto Frontier (RQ3)
+
+Sweeps Strategy A's ANN search parameter at fixed selectivity and plots the resulting `(mean latency, Recall@10)` points as a per-index frontier (Figure 4). HNSW sweeps `hnsw.ef_search ∈ {10…640}`; IVFFlat sweeps `ivfflat.probes ∈ {1…100}`. Larger values expose more ANN candidates to the post-filter, raising recall at the cost of latency. Ground truth (exact KNN over the filtered set) is computed once per selectivity level and reused across the sweep. The frontier is the deliverable; the exact numbers depend on dataset scale, so run the command below to reproduce it against your dataset.
+
+```bash
+python experiments/exp_03_pareto.py --index-types hnsw,ivfflat
+```
+
+The characteristic shape: at low selectivity, HNSW's recall climbs steeply from ~0.2 (small `ef_search`) to 1.0 as the search widens, while IVFFlat saturates to full recall after only a few probes. This directly exposes the recall floor a latency-minimising deployment would accept.
+
+### Experiment 4 — Concurrency & Throughput (RQ4)
+
+Drives the same fixed workload from `N ∈ {1, 2, 4, 8}` concurrent client threads (each an independent psycopg2 connection, released into the timed phase together by a barrier) and reports aggregate QPS plus mean/P95/P99 latency per client count (Figure 5). QPS uses the timed-phase wall clock (overlapping throughput), not the sum of per-client rates.
+
+```bash
+python experiments/exp_04_concurrency.py --clients 1,2,4,8 --strategy A
+```
+
+Reported alongside QPS is a **scaling efficiency** = `QPS(N) / (QPS(1) × N)`: 1.0 is perfect linear scaling, and the drop-off marks where contention on shared HNSW traversal begins to bite.
+
 ---
 
 ## Quick Start
@@ -188,6 +212,12 @@ python experiments/exp_01_selectivity.py --n-queries 50 --n-warmup 5
 
 # Experiment 2: adaptive selector evaluation (RQ2)
 python experiments/exp_02_adaptive.py --n-queries 50 --n-warmup 5
+
+# Experiment 3: recall-latency Pareto sweep (RQ3, v0.5)
+python experiments/exp_03_pareto.py --index-types hnsw,ivfflat
+
+# Experiment 4: concurrency & throughput (RQ4, v0.5)
+python experiments/exp_04_concurrency.py --clients 1,2,4,8 --strategy A
 ```
 
 ### 5. Generate figures
@@ -200,6 +230,8 @@ Output saved to `figures/`:
 - `fig_01_latency_vs_selectivity.png` — Strategy A vs. B across selectivity levels with θ* crossover annotation
 - `fig_02_adaptive_vs_fixed.png` — Adaptive vs. Fixed-A, Fixed-B, and Oracle lower bound
 - `fig_03_index_comparison.png` — HNSW vs. IVFFlat latency and Recall@10 *(v0.2; generated only when an IVFFlat run is present)*
+- `fig_04_pareto.png` — Recall@10 vs. latency Pareto frontier per index *(v0.5; requires `exp_03_pareto.json`)*
+- `fig_05_concurrency.png` — QPS & tail latency vs. concurrent clients *(v0.5; requires `exp_04_concurrency.json`)*
 
 ---
 
@@ -236,6 +268,32 @@ python run_experiments.py --scale large --index-types hnsw,ivfflat
 ```
 
 `--scale small` (10K) and `--scale full` (50K, default) are unchanged.
+
+---
+
+## What's New in v0.5
+
+v0.5 adds two experiments that probe *how* Strategy A behaves under conditions v0.1/v0.2 held fixed — the ANN search parameter and concurrent load. Both are additive: existing experiments, results, and tests are unchanged.
+
+**1. Recall–latency Pareto sweep (RQ3, `exp_03_pareto.py`).** `BenchmarkRunner.run_strategy_a` gained optional `ef_search_override` / `probes_override` arguments. Left at `None`, the v0.1/v0.2 floor behaviour (raise the search parameter up to the candidate-pool size) is preserved exactly. The sweep sets them explicitly so it can reach values *below* that floor — the low-recall/low-latency end of the frontier that the floor otherwise hides:
+
+```bash
+python experiments/exp_03_pareto.py --index-types hnsw,ivfflat \
+    --selectivity-levels 0.01,0.10
+```
+
+Ground truth is computed once per selectivity level and reused across all swept values, so the sweep cost is dominated by the queries themselves. Output: `results/exp_03_pareto.json` → Figure 4.
+
+**2. Concurrency & throughput (RQ4, `exp_04_concurrency.py`, `benchmark/concurrency.py`).** A new threaded workload runner drives `N` clients, each with its own psycopg2 connection (connections are not thread-safe to share), released into the timed phase together by a `threading.Barrier` so the measured wall clock reflects genuine overlap. The connection and runner factories are injectable, so the whole concurrent path is unit-tested without a live database:
+
+```bash
+python experiments/exp_04_concurrency.py --clients 1,2,4,8 \
+    --strategy A --index-type hnsw
+```
+
+Aggregate QPS uses the timed-phase wall clock (max end − min start across clients), and each client count reports a **scaling efficiency** relative to the single-client baseline. Output: `results/exp_04_concurrency.json` → Figure 5.
+
+> **Gotcha:** at small scale (≤ a few thousand rows) both experiments are dominated by client↔DB round-trip latency rather than index work, so the frontier compresses and QPS scales near-linearly. The trends sharpen at 50K–100K rows, where ANN traversal and lock contention actually dominate.
 
 ---
 
@@ -280,6 +338,7 @@ HyBench/
 │   ├── db.py                   PostgreSQL connection, timed query utilities
 │   ├── runner.py               Strategy A and B SQL + ground truth computation
 │   ├── planner.py              Selectivity-aware strategy selector
+│   ├── concurrency.py          Multi-client threaded workload runner (v0.5)
 │   └── metrics.py              Recall@K and latency aggregation
 │
 ├── data_gen/
@@ -291,16 +350,18 @@ HyBench/
 │
 ├── experiments/
 │   ├── exp_01_selectivity.py   RQ1: latency across 6 selectivity levels
-│   └── exp_02_adaptive.py      RQ2: adaptive vs. fixed strategies vs. oracle
+│   ├── exp_02_adaptive.py      RQ2: adaptive vs. fixed strategies vs. oracle
+│   ├── exp_03_pareto.py        RQ3: recall-latency Pareto sweep (v0.5)
+│   └── exp_04_concurrency.py   RQ4: concurrency & throughput (v0.5)
 │
 ├── analysis/
-│   └── plot_results.py         Two 300 DPI publication-quality figures
+│   └── plot_results.py         Five 300 DPI publication-quality figures
 │
 ├── data/synthetic/             Generated by generator.py (gitignored)
 │   ├── products.csv            50K rows (seed=42)
 │   └── embeddings.npy          50K x 384 float32
 │
-├── tests/                      14 unit tests (pytest, DB-free via mocks)
+├── tests/                      55 unit tests (pytest, DB-free via mocks)
 ├── results/                    JSON outputs (reference copies committed)
 ├── figures/                    Generated PNG figures (reference copies committed)
 └── docker-compose.yml          PostgreSQL 16 + pgvector 0.8.4, digest-pinned
@@ -349,7 +410,7 @@ class BenchmarkConfig:
 | Dataset capped at 50K rows | ✅ v0.2 adds `--scale large` (100K rows) |
 | COUNT(*) probe adds ~1–5 ms per query | ✅ v0.2 adds `PgStatsEstimator` (`--estimator pg_stats`) |
 | No memory profiling | ✅ v0.2 records `pg_relation_size` + client RSS in results JSON |
-| No concurrent client benchmarking | Deferred to v0.5 |
+| No concurrent client benchmarking | ✅ Added in v0.5 (`exp_04_concurrency.py`, `--clients 1,2,4,8`) |
 | Synthetic data only | Deferred to v0.5: real datasets |
 
 ---

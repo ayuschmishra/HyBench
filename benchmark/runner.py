@@ -136,10 +136,16 @@ class BenchmarkRunner:
         min_rating: float,
         top_k: int,
         candidate_multiplier: int = 100,
+        ef_search_override: Optional[int] = None,
+        probes_override: Optional[int] = None,
     ) -> QueryResult:
         # 100x default ensures results even at ~1% selectivity (1000 candidates * 0.01 = 10 expected matches)
         n_candidates = top_k * candidate_multiplier
 
+        # v0.5: overrides let the Pareto sweep (exp_03) set the exact ANN
+        # search parameter and observe the recall/latency it yields, bypassing
+        # the floors below. None → v0.1/v0.2 behaviour (floor to n_candidates),
+        # so exp_01/exp_02 and all existing tests are unaffected.
         if self.cfg.index_type == "ivfflat":
             # IVFFlat only returns rows from probed lists: with L lists over
             # N rows, p probes expose ~N*p/L candidates. Raise probes so the
@@ -148,18 +154,28 @@ class BenchmarkRunner:
             lists = self.cfg.ivfflat.lists or ivfflat_lists_for(self.total_rows)
             probes = self.cfg.ivfflat.probes or ivfflat_probes_for(lists)
             min_probes = math.ceil(n_candidates * lists / max(self.total_rows, 1))
+            effective_probes = (
+                probes_override
+                if probes_override is not None
+                else max(probes, min_probes)
+            )
             set_session_gucs(
                 self.conn,
                 enable_seqscan=False,
-                ivfflat_probes=max(probes, min_probes),
+                ivfflat_probes=effective_probes,
             )
         elif self.cfg.index_type == "hnsw":
             # ef_search must be >= n_candidates for HNSW to return enough rows.
             # pgvector caps returned rows at ef_search even if LIMIT > ef_search.
+            effective_ef = (
+                ef_search_override
+                if ef_search_override is not None
+                else max(self.cfg.hnsw.ef_search, n_candidates)
+            )
             set_session_gucs(
                 self.conn,
                 enable_seqscan=False,
-                hnsw_ef_search=max(self.cfg.hnsw.ef_search, n_candidates),
+                hnsw_ef_search=effective_ef,
             )
         else:
             set_session_gucs(self.conn, enable_seqscan=True)

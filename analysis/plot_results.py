@@ -6,6 +6,10 @@ Produces publication-quality figures:
   Figure 2: Adaptive Selector vs. Fixed Strategies (RQ2)
   Figure 3: ANN Index Comparison — HNSW vs. IVFFlat (v0.2; requires
             results/exp_01_selectivity_ivfflat.json, skipped otherwise)
+  Figure 4: Recall-Latency Pareto Frontier (v0.5; requires
+            results/exp_03_pareto.json, skipped otherwise)
+  Figure 5: Concurrency Scaling — QPS & tail latency vs. clients (v0.5;
+            requires results/exp_04_concurrency.json, skipped otherwise)
 
 Usage:
     python analysis/plot_results.py          # all figures with available inputs
@@ -302,14 +306,153 @@ def fig_03_index_comparison():
 
 
 # ---------------------------------------------------------------------------
+# Figure 4 — Recall-Latency Pareto Frontier (RQ3, v0.5)
+# ---------------------------------------------------------------------------
+
+def fig_04_pareto():
+    """Latency (x) vs. Recall@K (y) as the ANN search parameter is swept.
+
+    One curve per (index_type, selectivity level); each marker is one
+    ef_search (HNSW) or probes (IVFFlat) value. Up-and-to-the-left is better
+    (high recall, low latency). Requires results/exp_03_pareto.json; skips
+    silently otherwise, so the default pipeline is unaffected.
+    """
+    data = load_json("exp_03_pareto.json")
+    if not data:
+        print("[plot] Figure 4 skipped (need results/exp_03_pareto.json)")
+        return
+
+    groups = data.get("results", [])
+    if not groups:
+        print("[plot] Figure 4 skipped (no sweep results)")
+        return
+
+    # Distinct colour per index type; distinct marker per selectivity level.
+    idx_colors = {"hnsw": COL_A, "ivfflat": COL_IVF}
+    markers = ["o", "s", "^", "D", "v", "P"]
+    sel_levels = sorted({g["target_selectivity"] for g in groups})
+    sel_marker = {s: markers[i % len(markers)] for i, s in enumerate(sel_levels)}
+
+    with plt.style.context(STYLE):
+        fig, ax = plt.subplots(figsize=(7, 5))
+
+        for g in groups:
+            sweep = sorted(g["sweep"], key=lambda pt: pt["param_value"])
+            lat = [pt["mean_ms"] for pt in sweep]
+            rec = [pt["recall_mean"] for pt in sweep]
+            idx = g["index_type"]
+            sel = g["target_selectivity"]
+            color = idx_colors.get(idx, "#666666")
+            label = f"{idx.upper()} @ sel={g['actual_selectivity']*100:.1f}%"
+            ax.plot(lat, rec, sel_marker[sel] + "-", color=color, linewidth=1.7,
+                    markersize=6, label=label, alpha=0.9)
+            # Annotate the swept parameter value at each marker.
+            for pt in sweep:
+                ax.annotate(
+                    str(pt["param_value"]),
+                    xy=(pt["mean_ms"], pt["recall_mean"]),
+                    xytext=(3, 3), textcoords="offset points",
+                    fontsize=6.5, color=color, alpha=0.8,
+                )
+
+        ax.set_xlabel("Mean Query Latency (ms) — Strategy A")
+        ax.set_ylabel("Recall@10 (relative to filtered set)")
+        ax.set_ylim(-0.05, 1.08)
+        cfg = data.get("benchmark_config", {})
+        n_rows_k = cfg.get("n_rows", 50_000) // 1000
+        n_q = cfg.get("n_queries", 30)
+        ax.set_title(
+            "Figure 4 — Recall-Latency Pareto Frontier (RQ3)\n"
+            f"{n_rows_k}K rows · labels = ef_search (HNSW) / probes (IVFFlat) · "
+            f"n={n_q} queries/point"
+        )
+        ax.axhline(1.0, linestyle=":", color="grey", linewidth=0.8, alpha=0.5)
+        ax.legend(loc="lower right", fontsize=8)
+        fig.tight_layout()
+
+        out = FIGURES_DIR / "fig_04_pareto.png"
+        fig.savefig(out, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    print(f"[plot] Figure 4 saved: {out}")
+
+
+# ---------------------------------------------------------------------------
+# Figure 5 — Concurrency Scaling: QPS & tail latency vs. clients (RQ4, v0.5)
+# ---------------------------------------------------------------------------
+
+def fig_05_concurrency():
+    """Throughput (QPS) and P95 latency as concurrent client count rises.
+
+    Top panel: measured QPS vs. clients, with an ideal linear-scaling reference.
+    Bottom panel: mean and P95 latency vs. clients (contention inflates tails).
+    Requires results/exp_04_concurrency.json; skips silently otherwise.
+    """
+    data = load_json("exp_04_concurrency.json")
+    if not data:
+        print("[plot] Figure 5 skipped (need results/exp_04_concurrency.json)")
+        return
+
+    rows = sorted(data.get("results", []), key=lambda r: r["n_clients"])
+    if not rows:
+        print("[plot] Figure 5 skipped (no concurrency results)")
+        return
+
+    clients = [r["n_clients"] for r in rows]
+    qps = [r["qps"] for r in rows]
+    mean_ms = [r["mean_ms"] for r in rows]
+    p95_ms = [r["p95_ms"] for r in rows]
+    ideal = [qps[0] * n for n in clients] if qps else []
+
+    with plt.style.context(STYLE):
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 7), height_ratios=[1, 1])
+
+        # --- Top: throughput scaling ---
+        ax1.plot(clients, qps, "o-", color=COL_ADAPT, linewidth=1.9,
+                 markersize=7, label="Measured QPS")
+        ax1.plot(clients, ideal, "--", color="grey", linewidth=1.2,
+                 label="Ideal linear scaling")
+        ax1.set_xlabel("Concurrent Clients")
+        ax1.set_ylabel("Throughput (queries/sec)")
+        ax1.set_xticks(clients)
+        cfg = data.get("benchmark_config", {})
+        n_rows_k = cfg.get("n_rows", 50_000) // 1000
+        strat = cfg.get("strategy", "A")
+        idx = cfg.get("index_type", "hnsw").upper()
+        ax1.set_title(
+            "Figure 5 — Concurrency Scaling (RQ4)\n"
+            f"{n_rows_k}K rows · {idx} · Strategy {strat} · "
+            f"sel={cfg.get('selectivity', 0.10):.0%}"
+        )
+        ax1.legend(loc="upper left", fontsize=9)
+
+        # --- Bottom: latency under contention ---
+        ax2.plot(clients, mean_ms, "o-", color=COL_A, linewidth=1.8,
+                 markersize=6, label="Mean latency")
+        ax2.plot(clients, p95_ms, "s--", color=COL_B, linewidth=1.8,
+                 markersize=6, label="P95 latency")
+        ax2.set_xlabel("Concurrent Clients")
+        ax2.set_ylabel("Query Latency (ms)")
+        ax2.set_xticks(clients)
+        ax2.legend(loc="upper left", fontsize=9)
+
+        fig.tight_layout()
+        out = FIGURES_DIR / "fig_05_concurrency.png"
+        fig.savefig(out, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    print(f"[plot] Figure 5 saved: {out}")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Generate HyBench figures")
     parser.add_argument(
-        "--fig", type=int, choices=[1, 2, 3],
-        help="Which figure to generate (1, 2, or 3). Omit to generate all available.",
+        "--fig", type=int, choices=[1, 2, 3, 4, 5],
+        help="Which figure to generate (1-5). Omit to generate all available.",
     )
     parser.add_argument(
         "--theta", type=float, default=None,
@@ -323,6 +466,10 @@ def main():
         fig_02_adaptive_vs_fixed()
     if args.fig is None or args.fig == 3:
         fig_03_index_comparison()
+    if args.fig is None or args.fig == 4:
+        fig_04_pareto()
+    if args.fig is None or args.fig == 5:
+        fig_05_concurrency()
 
     print(f"\n[plot] Done. Figures in {FIGURES_DIR}/")
 
