@@ -107,7 +107,7 @@ def fig_01_latency_vs_selectivity(theta_star: float = None):
         ax1.set_ylabel("Mean Query Latency (ms)\n(error bars: ±1 SD, n=50 queries)")
         ax1.set_title(
             "Figure 1 — Filter Selectivity vs. Query Latency (RQ1)\n"
-            "50K rows · HNSW m=16 ef_search=40 · K=10 · "
+            "50K rows · HNSW m=16 · Strategy A ef_search=1000 · K=10 · "
             "Recall@K relative to filtered set"
         )
         ax1.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
@@ -195,7 +195,7 @@ def fig_02_adaptive_vs_fixed():
         ax.set_ylabel("Mean Query Latency (ms)")
         ax.set_title(
             "Figure 2 — Adaptive Selector vs. Fixed Strategies (RQ2)\n"
-            "50K rows · HNSW m=16 ef_search=40 · K=10 · n=50 queries per point"
+            "50K rows · HNSW m=16 · Strategy A ef_search=1000 · K=10 · n=50 queries per point"
         )
         ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.0f}%"))
         ax.legend(loc="upper right")

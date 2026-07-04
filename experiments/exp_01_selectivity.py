@@ -1,7 +1,7 @@
 """
 Experiment 1 — Filter Selectivity vs. Latency  (RQ1)
 
-Fixed variables : dataset = 50K, index = HNSW (ef_search=40), top_k = 10
+Fixed variables : dataset = 50K, index = HNSW (Strategy A effective ef_search=1000), top_k = 10
 Varied variable : filter selectivity in {1%, 5%, 10%, 25%, 50%, 75%}
 
 Protocol

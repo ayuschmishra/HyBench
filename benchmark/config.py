@@ -81,7 +81,7 @@ ADAPTIVE_THRESHOLD: float = 0.05   # derived from exp_01 crossover: B wins below
 # ---------------------------------------------------------------------------
 
 # Six selectivity targets covering the full range.
-# 0.75 replaces 0.90: easier to hit cleanly with the Mouse profile.
+# 0.75 replaces 0.90: hit cleanly with a cross-category price-cap query (no category filter).
 SELECTIVITY_LEVELS: List[float] = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75]
 
 # (category_or_None, max_price, min_rating) calibrated against the 50K synthetic dataset (seed=42).
