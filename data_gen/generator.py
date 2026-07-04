@@ -36,8 +36,10 @@ from benchmark.config import (
     CATEGORY_PROFILES,
     DataConfig,
     DBConfig,
+    HNSWConfig,
+    IVFFlatConfig,
 )
-from benchmark.db import get_connection
+from benchmark.db import ensure_vector_index, get_connection
 
 fake = Faker("en_IN")
 
@@ -361,7 +363,12 @@ def load_saved(cfg: DataConfig) -> Tuple[pd.DataFrame, np.ndarray]:
     return df, embeddings
 
 
-def load_to_db(df: pd.DataFrame, embeddings: np.ndarray, db_cfg: DBConfig) -> None:
+def load_to_db(
+    df: pd.DataFrame,
+    embeddings: np.ndarray,
+    db_cfg: DBConfig,
+    index_type: str = "hnsw",
+) -> None:
     """Insert generated products + embeddings into the products table."""
     conn = get_connection(db_cfg)
     cur = conn.cursor()
@@ -369,8 +376,9 @@ def load_to_db(df: pd.DataFrame, embeddings: np.ndarray, db_cfg: DBConfig) -> No
     print("[generator] Truncating products table...")
     cur.execute("TRUNCATE TABLE products RESTART IDENTITY;")
 
-    print(f"[generator] Dropping HNSW index for fast bulk load...")
+    print("[generator] Dropping ANN indexes for fast bulk load...")
     cur.execute("DROP INDEX IF EXISTS idx_products_hnsw;")
+    cur.execute("DROP INDEX IF EXISTS idx_products_ivfflat;")
 
     print(f"[generator] Inserting {len(df):,} rows (batch size 1000)...")
     t0 = time.perf_counter()
@@ -399,16 +407,19 @@ def load_to_db(df: pd.DataFrame, embeddings: np.ndarray, db_cfg: DBConfig) -> No
     )
     print(f"[generator] Inserted {len(df):,} rows in {time.perf_counter() - t0:.1f}s")
 
-    print("[generator] Rebuilding HNSW index (m=16, ef_construction=64)...")
-    t1 = time.perf_counter()
-    cur.execute(
-        """
-        CREATE INDEX idx_products_hnsw
-        ON products USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64);
-        """
+    print(f"[generator] Building {index_type} index...")
+    info = ensure_vector_index(
+        conn, index_type, HNSWConfig(), IVFFlatConfig(), n_rows=len(df)
     )
-    print(f"[generator] HNSW index built in {time.perf_counter() - t1:.1f}s")
+    print(
+        f"[generator] {info['name']} built in {info['build_seconds']:.1f}s "
+        f"(params={info['params']})"
+    )
+
+    # ensure_vector_index runs ANALYZE after a rebuild, but run it explicitly
+    # so pg_stats (needed by PgStatsEstimator) is populated even on the
+    # built=False path.
+    cur.execute("ANALYZE products;")
 
     cur.close()
     conn.close()
@@ -439,10 +450,12 @@ if __name__ == "__main__":
                          help="Number of product rows (default: 50000)")
     _parser.add_argument("--seed", type=int, default=42,
                          help="Random seed (default: 42)")
+    _parser.add_argument("--index-type", choices=["hnsw", "ivfflat"], default="hnsw",
+                         help="ANN index to build after load (default: hnsw)")
     _args = _parser.parse_args()
 
     cfg = DataConfig(n_rows=_args.n_rows, random_seed=_args.seed)
     db_cfg = DBConfig()
     df, embeddings = generate_and_save(cfg)
-    load_to_db(df, embeddings, db_cfg)
+    load_to_db(df, embeddings, db_cfg, index_type=_args.index_type)
     write_checksums(Path(cfg.output_dir))

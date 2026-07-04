@@ -1,11 +1,17 @@
 """
 Experiment 2 — Adaptive Strategy Selector Evaluation (RQ2)
 
-Four conditions evaluated per selectivity level:
-  Fixed-A   : always execute Strategy A (vector-first)
-  Fixed-B   : always execute Strategy B (filter-first)
-  Adaptive  : dispatch via Lightweight Selectivity-Aware Execution Strategy Selector
-  Oracle    : retrospective min(latency_A, latency_B) per query
+Conditions evaluated per selectivity level:
+  Fixed-A           : always execute Strategy A (vector-first)
+  Fixed-B           : always execute Strategy B (filter-first)
+  Adaptive          : selector with exact COUNT(*) probe estimator
+  Adaptive-pg_stats : selector with pg_stats statistics estimator [v0.2]
+  Oracle            : retrospective min(latency_A, latency_B) per query
+
+The two adaptive conditions isolate the effect of selectivity-estimation
+quality: the COUNT(*) probe is exact but costs a round-trip; the pg_stats
+estimator is ~free after one catalog read but inherits the planner's
+attribute-independence error on correlated predicates.
 
 Output: results/exp_02_adaptive.json
 """
@@ -31,8 +37,14 @@ from benchmark.config import (
     SELECTIVITY_CONFIGS,
     SELECTIVITY_LEVELS,
 )
-from benchmark.db import connection, get_filtered_row_count, get_table_row_count
-from benchmark.planner import execute_adaptive
+from benchmark.db import (
+    connection,
+    ensure_vector_index,
+    get_filtered_row_count,
+    get_memory_metrics,
+    get_table_row_count,
+)
+from benchmark.planner import CountProbeEstimator, PgStatsEstimator, execute_adaptive
 from benchmark.runner import BenchmarkRunner
 from benchmark.metrics import compute_recall_at_k
 
@@ -164,6 +176,13 @@ def main():
     parser.add_argument("--threshold", type=float, default=ADAPTIVE_THRESHOLD)
     parser.add_argument("--n-rows", type=int, default=50_000,
                         help="Dataset size to benchmark against (default: 50000)")
+    parser.add_argument("--estimator", choices=["count", "pg_stats", "both"],
+                        default="both",
+                        help="Selectivity estimator(s) for the adaptive condition "
+                             "(default: both — compare probe vs. pg_stats) [v0.2]")
+    parser.add_argument("--output", type=Path,
+                        default=Path("results/exp_02_adaptive.json"),
+                        help="Results path (default: results/exp_02_adaptive.json)")
     args = parser.parse_args()
 
     db_cfg = DBConfig()
@@ -192,6 +211,15 @@ def main():
         hnsw=HNSWConfig(ef_search=args.ef_search),
     )
 
+    # Estimator instances are created once so the PgStatsEstimator's cached
+    # catalog read persists across selectivity levels (its realistic steady
+    # state); the first adaptive-pg_stats warmup query pays the one-off load.
+    estimators: dict[str, object] = {}
+    if args.estimator in ("count", "both"):
+        estimators["count"] = CountProbeEstimator()
+    if args.estimator in ("pg_stats", "both"):
+        estimators["pg_stats"] = PgStatsEstimator()
+
     def discard_session(conn) -> None:
         """Clear PostgreSQL session state (prepared plans, GUCs) between passes."""
         with conn.cursor() as _cur:
@@ -207,6 +235,17 @@ def main():
             pg_version = _cur.fetchone()[0]
 
         total_rows = get_table_row_count(conn, "products")
+
+        # Selector evaluation runs on HNSW; rebuild it if a prior
+        # `exp_01 --index-type ivfflat` run replaced it.
+        index_info = ensure_vector_index(
+            conn, "hnsw", bench_cfg.hnsw, bench_cfg.ivfflat, total_rows
+        )
+        print(
+            f"[exp_02] Index: {index_info['name']} params={index_info['params']} "
+            f"({'rebuilt in %.1fs' % index_info['build_seconds'] if index_info['built'] else 'reused'})"
+        )
+
         runner = BenchmarkRunner(
             conn=conn, cfg=bench_cfg, db_cfg=db_cfg, total_rows=total_rows
         )
@@ -257,21 +296,30 @@ def main():
             # Oracle: per-query min of the two fixed-condition latencies above
             lat_oracle = [min(a, b) for a, b in zip(lat_a, lat_b)]
 
-            # --- Adaptive pass (separate warmup so no cache carryover) ---
-            discard_session(conn)
-            for q in warmup_q:
-                execute_adaptive(runner, q, cat, mp, mr, total_rows, args.top_k, args.threshold)
+            # --- Adaptive passes, one per estimator (separate warmup each,
+            #     so no cache carryover between conditions) ---
+            def run_adaptive_pass(estimator):
+                discard_session(conn)
+                for q in warmup_q:
+                    execute_adaptive(runner, q, cat, mp, mr, total_rows,
+                                     args.top_k, args.threshold, estimator=estimator)
+                lats, choices, overheads, recalls, sigmas = [], [], [], [], []
+                for q in run_q:
+                    gt_ids = runner.compute_ground_truth(q, cat, mp, mr, args.top_k)
+                    res_ad, sigma_ad, choice, probe_s = execute_adaptive(
+                        runner, q, cat, mp, mr, total_rows,
+                        args.top_k, args.threshold, estimator=estimator
+                    )
+                    lats.append(res_ad.latency_s * 1000)
+                    choices.append(choice)
+                    overheads.append(probe_s * 1000)
+                    recalls.append(compute_recall_at_k(res_ad.ids, gt_ids, args.top_k))
+                    sigmas.append(sigma_ad)
+                return lats, choices, overheads, recalls, sigmas
 
-            lat_adapt, adapt_choices, probe_times, recall_adapt = [], [], [], []
-            for q in run_q:
-                gt_ids = runner.compute_ground_truth(q, cat, mp, mr, args.top_k)
-                res_ad, sigma_ad, choice, probe_s = execute_adaptive(
-                    runner, q, cat, mp, mr, total_rows, args.top_k, args.threshold
-                )
-                lat_adapt.append(res_ad.latency_s * 1000)
-                adapt_choices.append(choice)
-                probe_times.append(probe_s * 1000)
-                recall_adapt.append(compute_recall_at_k(res_ad.ids, gt_ids, args.top_k))
+            adaptive_passes = {
+                name: run_adaptive_pass(est) for name, est in estimators.items()
+            }
 
             def stats(vals):
                 arr = np.array(vals)
@@ -282,9 +330,6 @@ def main():
                     "std_ms": float(np.std(arr)),
                 }
 
-            n_chose_a = adapt_choices.count("A")
-            n_chose_b = adapt_choices.count("B")
-
             row = {
                 "target_selectivity": target_sel,
                 "actual_selectivity": actual_sel,
@@ -292,26 +337,48 @@ def main():
                 "threshold": args.threshold,
                 "fixed_a": stats(lat_a),
                 "fixed_b": stats(lat_b),
-                "adaptive": stats(lat_adapt),
                 "oracle": stats(lat_oracle),
-                "adaptive_choices": {"A": n_chose_a, "B": n_chose_b},
-                "probe_overhead_ms": stats(probe_times),
                 "recall_a": float(np.mean(recall_a)),
                 "recall_b": float(np.mean(recall_b)),
-                "recall_adaptive": float(np.mean(recall_adapt)),
             }
+            for name, (lats, choices, overheads, recalls, sigmas) in adaptive_passes.items():
+                if name == "count":
+                    # v0.1-compatible key names (figures/summary read these).
+                    key, overhead_key, recall_key = (
+                        "adaptive", "probe_overhead_ms", "recall_adaptive"
+                    )
+                else:
+                    key, overhead_key, recall_key = (
+                        "adaptive_pgstats",
+                        "estimate_overhead_pgstats_ms",
+                        "recall_adaptive_pgstats",
+                    )
+                    # Constant predicate per level, so this is THE estimate;
+                    # compare with actual_selectivity for estimation error.
+                    row["sigma_pgstats_mean"] = float(np.mean(sigmas))
+                row[key] = stats(lats)
+                row[f"{key}_choices"] = {"A": choices.count("A"), "B": choices.count("B")}
+                row[overhead_key] = stats(overheads)
+                row[recall_key] = float(np.mean(recalls))
             results.append(row)
 
             a_mean = row["fixed_a"]["mean_ms"]
             b_mean = row["fixed_b"]["mean_ms"]
-            ad_mean = row["adaptive"]["mean_ms"]
             or_mean = row["oracle"]["mean_ms"]
-            gap_pct = (ad_mean - or_mean) / max(or_mean, 0.001) * 100
-            print(
+            line = (
                 f"         Fixed-A={a_mean:.1f}ms  Fixed-B={b_mean:.1f}ms  "
-                f"Adaptive={ad_mean:.1f}ms  Oracle={or_mean:.1f}ms  "
-                f"gap={gap_pct:+.1f}%  choices=A:{n_chose_a}/B:{n_chose_b}"
+                f"Oracle={or_mean:.1f}ms"
             )
+            for key, label in (("adaptive", "Adaptive"),
+                               ("adaptive_pgstats", "Adaptive-pgstats")):
+                if key in row:
+                    m = row[key]["mean_ms"]
+                    gap = (m - or_mean) / max(or_mean, 0.001) * 100
+                    ch = row[f"{key}_choices"]
+                    line += f"  {label}={m:.1f}ms (gap {gap:+.1f}%, A:{ch['A']}/B:{ch['B']})"
+            print(line)
+
+        memory = get_memory_metrics(conn)
 
     output = {
         "experiment": "exp_02_adaptive",
@@ -322,6 +389,8 @@ def main():
             "n_warmup": args.n_warmup,
             "top_k": args.top_k,
             "index_type": "hnsw",
+            "index_params": index_info["params"],
+            "estimator": args.estimator,
             "ef_search": args.ef_search,
             "threshold": args.threshold,
             "platform": platform.platform(),
@@ -331,8 +400,10 @@ def main():
         "results": results,
     }
 
-    out_path = Path("results/exp_02_adaptive.json")
-    out_path.parent.mkdir(exist_ok=True)
+    output["memory"] = memory
+
+    out_path = args.output
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(output, indent=2))
     print(f"[exp_02] Results saved to {out_path}")
 

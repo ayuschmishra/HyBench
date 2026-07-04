@@ -1,8 +1,10 @@
-# HyBench v0.1
+# HyBench v0.2
 
 **A Reproducible Experimental Framework for Hybrid Relational–Vector Query Processing in PostgreSQL**
 
 > *Empirically characterising filter-selectivity effects on hybrid query latency and validating a lightweight selectivity-aware execution strategy selector.*
+
+> **v0.2 additions:** IVFFlat index comparison, a statistics-based (`pg_stats`) selectivity estimator, memory/storage profiling, and 100K-row runs — see [What's New in v0.2](#whats-new-in-v02).
 
 ---
 
@@ -197,6 +199,43 @@ python analysis/plot_results.py
 Output saved to `figures/`:
 - `fig_01_latency_vs_selectivity.png` — Strategy A vs. B across selectivity levels with θ* crossover annotation
 - `fig_02_adaptive_vs_fixed.png` — Adaptive vs. Fixed-A, Fixed-B, and Oracle lower bound
+- `fig_03_index_comparison.png` — HNSW vs. IVFFlat latency and Recall@10 *(v0.2; generated only when an IVFFlat run is present)*
+
+---
+
+## What's New in v0.2
+
+v0.2 lands the four items previously deferred from the v0.1 scope. All are opt-in flags — the default `python run_experiments.py` invocation reproduces the v0.1 HNSW pipeline unchanged.
+
+**1. IVFFlat index comparison.** Strategy A can now run on an IVFFlat index instead of HNSW:
+
+```bash
+# Benchmark Strategy A/B with IVFFlat; writes results/exp_01_selectivity_ivfflat.json
+python experiments/exp_01_selectivity.py --index-type ivfflat
+
+# Run both indexes end-to-end, then Figure 3 compares them
+python run_experiments.py --index-types hnsw,ivfflat
+```
+
+`lists` and `probes` are derived from dataset size per pgvector guidance (`lists ≈ rows/1000`, `probes ≈ √lists`) and can be overridden in `IVFFlatConfig`. `db.ensure_vector_index()` guarantees exactly one ANN index exists at a time, so per-index attribution is never contaminated by the planner choosing the cheaper index.
+
+**2. Statistics-based selectivity estimator.** `PgStatsEstimator` (in `benchmark/planner.py`) estimates selectivity from PostgreSQL's `pg_stats` MCV lists and histograms instead of a `COUNT(*)` probe — no per-query round-trip. Experiment 2 compares both estimators side by side:
+
+```bash
+python experiments/exp_02_adaptive.py --estimator both   # default: count + pg_stats
+```
+
+The `pg_stats` path trades exactness for speed: it inherits the planner's attribute-independence assumption (so it over-estimates correlated predicates like `category = 'Laptop' AND price < X`), but its per-query overhead is ~10× lower than the probe. Both the estimate and its error vs. the exact count are recorded per level.
+
+**3. Memory & storage profiling.** Every results JSON now carries a `memory` block: `pg_relation_size` for the heap and each index (so HNSW vs. IVFFlat footprint is directly comparable), `pg_total_relation_size`, and the client process RSS.
+
+**4. 100K-row scale.** `--scale large` runs the full pipeline at 100K rows:
+
+```bash
+python run_experiments.py --scale large --index-types hnsw,ivfflat
+```
+
+`--scale small` (10K) and `--scale full` (50K, default) are unchanged.
 
 ---
 
@@ -302,16 +341,16 @@ class BenchmarkConfig:
 
 ---
 
-## Known Limitations (v0.1 Scope)
+## Known Limitations
 
-| Limitation | Plan |
+| Limitation | Status |
 |-----------|------|
-| IVFFlat index not implemented | v0.2 |
-| Dataset capped at 50K rows | v0.2 |
-| COUNT(*) probe adds ~1–5 ms per query | v0.2: pg_stats estimator |
-| No memory profiling | v0.2 |
-| No concurrent client benchmarking | v0.5 |
-| Synthetic data only | v0.5: real datasets |
+| IVFFlat index not implemented | ✅ Added in v0.2 (`--index-type ivfflat`) |
+| Dataset capped at 50K rows | ✅ v0.2 adds `--scale large` (100K rows) |
+| COUNT(*) probe adds ~1–5 ms per query | ✅ v0.2 adds `PgStatsEstimator` (`--estimator pg_stats`) |
+| No memory profiling | ✅ v0.2 records `pg_relation_size` + client RSS in results JSON |
+| No concurrent client benchmarking | Deferred to v0.5 |
+| Synthetic data only | Deferred to v0.5: real datasets |
 
 ---
 

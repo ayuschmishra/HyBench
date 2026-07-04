@@ -1,15 +1,17 @@
 """
-HyBench v0.1 — master experiment runner.
+HyBench — master experiment runner.
 
-Runs the two experiments in sequence and then generates both figures.
-θ* is derived from Experiment 1 results and injected into config before
-Experiment 2 runs.
+Runs the experiments in sequence and then generates the figures.
+θ* is derived from Experiment 1 (HNSW) results and injected into config
+before Experiment 2 runs.
 
 Usage:
-    python run_experiments.py                   # full run (50K rows)
+    python run_experiments.py                   # full run (50K rows, HNSW)
     python run_experiments.py --skip-data-gen   # skip data generation (data already loaded)
     python run_experiments.py --exp 1           # only Experiment 1
     python run_experiments.py --exp 2           # only Experiment 2 (requires exp_01 output)
+    python run_experiments.py --scale large --index-types hnsw,ivfflat
+                                                # v0.2: 100K rows, both ANN indexes
 """
 
 import argparse
@@ -78,12 +80,26 @@ def main():
     parser.add_argument("--n-queries", type=int, default=50)
     parser.add_argument("--n-warmup",  type=int, default=5)
     parser.add_argument(
-        "--scale", choices=["small", "full"], default="full",
-        help="small=10K rows (~5 min), full=50K rows (~45 min) [default: full]",
+        "--scale", choices=["small", "full", "large"], default="full",
+        help="small=10K rows (~5 min), full=50K rows (~45 min), "
+             "large=100K rows (v0.2) [default: full]",
+    )
+    parser.add_argument(
+        "--index-types", default="hnsw",
+        help="Comma-separated ANN indexes for Experiment 1: hnsw, ivfflat, "
+             "or hnsw,ivfflat [default: hnsw] (v0.2)",
     )
     args = parser.parse_args()
 
-    n_rows = 10_000 if args.scale == "small" else 50_000
+    n_rows = {"small": 10_000, "full": 50_000, "large": 100_000}[args.scale]
+
+    index_types = [t.strip() for t in args.index_types.split(",") if t.strip()]
+    invalid = set(index_types) - {"hnsw", "ivfflat"}
+    if invalid or not index_types:
+        print(f"[run] ERROR: invalid --index-types {args.index_types!r}")
+        sys.exit(1)
+    # HNSW first: θ* for Experiment 2 is derived from the HNSW exp_01 output.
+    index_types.sort(key=lambda t: t != "hnsw")
 
     run_exp1 = args.exp is None or args.exp == 1
     run_exp2 = args.exp is None or args.exp == 2
@@ -95,13 +111,15 @@ def main():
         )
 
     if run_exp1:
-        run(
-            ["experiments/exp_01_selectivity.py",
-             f"--n-queries={args.n_queries}",
-             f"--n-warmup={args.n_warmup}",
-             f"--n-rows={n_rows}"],
-            "Experiment 1 — Filter Selectivity vs. Latency (RQ1)",
-        )
+        for index_type in index_types:
+            run(
+                ["experiments/exp_01_selectivity.py",
+                 f"--n-queries={args.n_queries}",
+                 f"--n-warmup={args.n_warmup}",
+                 f"--n-rows={n_rows}",
+                 f"--index-type={index_type}"],
+                f"Experiment 1 — Filter Selectivity vs. Latency (RQ1, {index_type})",
+            )
 
     if run_exp2:
         exp01_path = Path("results/exp_01_selectivity.json")

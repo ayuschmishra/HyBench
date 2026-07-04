@@ -17,6 +17,7 @@ Ground truth is computed by Strategy B with sequential scan forced off on
 the index scan side — i.e., exact KNN over the filtered set.
 """
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -25,7 +26,12 @@ import numpy as np
 import psutil
 import psycopg2
 
-from benchmark.config import BenchmarkConfig, DBConfig
+from benchmark.config import (
+    BenchmarkConfig,
+    DBConfig,
+    ivfflat_lists_for,
+    ivfflat_probes_for,
+)
 from benchmark.db import (
     execute_timed,
     get_filtered_row_count,
@@ -135,9 +141,17 @@ class BenchmarkRunner:
         n_candidates = top_k * candidate_multiplier
 
         if self.cfg.index_type == "ivfflat":
-            raise NotImplementedError(
-                "IVFFlat support deferred to HyBench v0.2. "
-                "Use index_type='hnsw' for v0.1."
+            # IVFFlat only returns rows from probed lists: with L lists over
+            # N rows, p probes expose ~N*p/L candidates. Raise probes so the
+            # exposed pool can cover n_candidates — the IVFFlat analogue of
+            # the ef_search floor applied in the HNSW branch below.
+            lists = self.cfg.ivfflat.lists or ivfflat_lists_for(self.total_rows)
+            probes = self.cfg.ivfflat.probes or ivfflat_probes_for(lists)
+            min_probes = math.ceil(n_candidates * lists / max(self.total_rows, 1))
+            set_session_gucs(
+                self.conn,
+                enable_seqscan=False,
+                ivfflat_probes=max(probes, min_probes),
             )
         elif self.cfg.index_type == "hnsw":
             # ef_search must be >= n_candidates for HNSW to return enough rows.

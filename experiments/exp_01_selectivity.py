@@ -1,7 +1,9 @@
 """
 Experiment 1 — Filter Selectivity vs. Latency  (RQ1)
 
-Fixed variables : dataset = 50K, index = HNSW (Strategy A effective ef_search=1000), top_k = 10
+Fixed variables : dataset size, ANN index (--index-type hnsw|ivfflat), top_k = 10
+                  (HNSW: Strategy A effective ef_search = max(floor, n_candidates);
+                   IVFFlat: probes raised analogously to cover n_candidates)
 Varied variable : filter selectivity in {1%, 5%, 10%, 25%, 50%, 75%}
 
 Protocol
@@ -34,12 +36,15 @@ from benchmark.config import (
     DBConfig,
     DataConfig,
     HNSWConfig,
+    IVFFlatConfig,
     SELECTIVITY_LEVELS,
     SELECTIVITY_CONFIGS,
 )
 from benchmark.db import (
     connection,
+    ensure_vector_index,
     get_filtered_row_count,
+    get_memory_metrics,
     get_table_row_count,
     set_session_gucs,
 )
@@ -129,6 +134,11 @@ def main():
     parser.add_argument("--ef-search", type=int, default=40)
     parser.add_argument("--n-rows",    type=int, default=50_000,
                         help="Dataset size to benchmark against (default: 50000)")
+    parser.add_argument("--index-type", choices=["hnsw", "ivfflat"], default="hnsw",
+                        help="ANN index for Strategy A (default: hnsw) [v0.2]")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Results path (default: results/exp_01_selectivity.json, "
+                             "or ..._ivfflat.json for --index-type ivfflat)")
     args = parser.parse_args()
 
     db_cfg = DBConfig()
@@ -138,8 +148,9 @@ def main():
         n_queries=args.n_queries,
         n_warmup=args.n_warmup,
         strategy="both",
-        index_type="hnsw",
+        index_type=args.index_type,
         hnsw=HNSWConfig(ef_search=args.ef_search),
+        ivfflat=IVFFlatConfig(),
     )
 
     print("[exp_01] Loading saved data...")
@@ -163,6 +174,17 @@ def main():
             pg_version = _cur.fetchone()[0]
 
         total_rows = get_table_row_count(conn)
+
+        # Exactly one ANN index must exist for clean attribution: with both
+        # present the planner would pick whichever it costs cheaper.
+        index_info = ensure_vector_index(
+            conn, args.index_type, bench_cfg.hnsw, bench_cfg.ivfflat, total_rows
+        )
+        print(
+            f"[exp_01] Index: {index_info['name']} params={index_info['params']} "
+            f"({'rebuilt in %.1fs' % index_info['build_seconds'] if index_info['built'] else 'reused'})"
+        )
+
         runner = BenchmarkRunner(conn, bench_cfg, db_cfg, total_rows)
 
         n_total = args.n_warmup + args.n_queries
@@ -239,6 +261,8 @@ def main():
                 f"speedup={'A' if a_mean < b_mean else 'B'}={max(a_mean,b_mean)/max(min(a_mean,b_mean),0.001):.2f}x"
             )
 
+        memory = get_memory_metrics(conn)
+
     output = {
         "experiment": "exp_01_selectivity",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -247,17 +271,24 @@ def main():
             "n_queries": args.n_queries,
             "n_warmup": args.n_warmup,
             "top_k": args.top_k,
-            "index_type": "hnsw",
+            "index_type": args.index_type,
+            "index_params": index_info["params"],
             "ef_search": args.ef_search,
             "platform": platform.platform(),
             "python_version": sys.version,
             "pg_version": pg_version,
         },
+        "memory": memory,
         "results": results,
     }
 
-    out_path = Path("results/exp_01_selectivity.json")
-    out_path.parent.mkdir(exist_ok=True)
+    default_name = (
+        "exp_01_selectivity.json"
+        if args.index_type == "hnsw"
+        else f"exp_01_selectivity_{args.index_type}.json"
+    )
+    out_path = args.output or Path("results") / default_name
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)
 

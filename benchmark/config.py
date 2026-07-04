@@ -1,12 +1,12 @@
 """
-Centralised experiment configuration for HyBench v0.1.
+Centralised experiment configuration for HyBench.
 
 All tuneable parameters live here. Experiment scripts import from this
 module; they never hardcode values themselves.
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +44,7 @@ class DataConfig:
 
 
 # ---------------------------------------------------------------------------
-# Index parameters (HNSW only in v0.1; IVFFlat deferred to v0.2)
+# Index parameters (HNSW since v0.1; IVFFlat added in v0.2)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -52,6 +52,24 @@ class HNSWConfig:
     m: int = 16
     ef_construction: int = 64
     ef_search: int = 40           # session-level GUC, set per-query
+
+
+@dataclass
+class IVFFlatConfig:
+    # None means "derive from dataset size" via the helpers below, so a single
+    # config works across --scale small/full/large without manual retuning.
+    lists: Optional[int] = None    # build-time: number of inverted lists
+    probes: Optional[int] = None   # query-time GUC: lists probed per search
+
+
+def ivfflat_lists_for(n_rows: int) -> int:
+    """pgvector guidance: lists ≈ rows/1000 for datasets ≤ 1M rows (min 10)."""
+    return max(10, n_rows // 1000)
+
+
+def ivfflat_probes_for(lists: int) -> int:
+    """pgvector guidance: probes ≈ sqrt(lists) (min 1)."""
+    return max(1, int(round(lists ** 0.5)))
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +82,9 @@ class BenchmarkConfig:
     n_queries: int = 50
     n_warmup: int = 5
     strategy: str = "both"        # "A", "B", or "both"
-    index_type: str = "hnsw"
+    index_type: str = "hnsw"      # "hnsw" or "ivfflat"
     hnsw: HNSWConfig = field(default_factory=HNSWConfig)
+    ivfflat: IVFFlatConfig = field(default_factory=IVFFlatConfig)
 
 
 # ---------------------------------------------------------------------------
